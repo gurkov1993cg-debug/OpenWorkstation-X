@@ -1,0 +1,29 @@
+name: Inspect v0.2.8 source
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/inspect-v028-source.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Expand and inspect source
+        shell: bash
+        run: |
+          rm -rf srcdump && mkdir srcdump
+          unzip -q ConsoleChannelStrip-X-v0.2.8-source.zip -d srcdump
+          echo '=== FILES ==='
+          find srcdump -type f | sort
+          echo '=== RELEVANT SOURCE ==='
+          while IFS= read -r f; do
+            echo "===== FILE: $f ====="
+            sed -n '1,1800p' "$f"
+          done < <(find srcdump -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name 'CMakeLists.txt' \) | sort)
