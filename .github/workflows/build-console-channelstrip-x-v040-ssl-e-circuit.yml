@@ -1,0 +1,369 @@
+name: Build Console Channel Strip X v0.4.0 SSL E Circuit EQ
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-console-channelstrip-x-v040-ssl-e-circuit.yml'
+      - 'ConsoleChannelStrip-X-v0.2.8-source.zip'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Expand known-good v0.2.8 baseline
+        shell: bash
+        run: |
+          rm -rf srcwork build
+          mkdir srcwork
+          ditto -x -k ConsoleChannelStrip-X-v0.2.8-source.zip srcwork
+          ROOT=$(find srcwork -name CMakeLists.txt -print -quit | xargs dirname)
+          test -n "$ROOT"
+          echo "ROOT=$ROOT" >> "$GITHUB_ENV"
+
+      - name: Replace EQ with SSL E-series circuit-derived transfer model
+        shell: bash
+        run: |
+          cat >/tmp/patch_ssl_eq.py <<'PY'
+          from pathlib import Path
+          import os, re
+
+          root = Path(os.environ["ROOT"])
+          dsp = root / "src/DspEngine.cpp"
+          proc = root / "src/PluginProcessor.cpp"
+          edt = root / "src/PluginEditor.cpp"
+          cmk = root / "CMakeLists.txt"
+          gui = root / "tests/GuiLayoutSmokeTests.cpp"
+          tst = root / "tests/ParameterSmokeTests.cpp"
+
+          s = cmk.read_text()
+          s2, n = re.subn(r'project\(ConsoleChannelStripX VERSION [0-9.]+',
+                          'project(ConsoleChannelStripX VERSION 0.4.0', s, count=1)
+          if n != 1:
+              raise SystemExit("CMake version replacement failed")
+          cmk.write_text(s2)
+
+          s = dsp.read_text()
+          anchor = "void DspEngine::prepare (double sampleRate, int maximumBlockSize, int numChannels)"
+          if anchor not in s:
+              raise SystemExit("DspEngine prepare anchor missing")
+
+          helpers = r'''
+          namespace ssl4000e
+          {
+              using Coeff = DspEngine::Coefficients;
+              using CoeffPtr = DspEngine::CoeffPtr;
+              constexpr double pi = juce::MathConstants<double>::pi;
+
+              struct RcPair { double r1, r2, c1, c2; };
+
+              constexpr RcPair hmf02  { 4300.0, 5100.0,  4.7e-9,  4.7e-9 };
+              constexpr RcPair hmf242 { 3000.0, 3600.0,  4.7e-9,  4.7e-9 };
+              constexpr RcPair lmf02  { 4300.0, 5100.0, 15.0e-9, 15.0e-9 };
+              constexpr RcPair lmf242 { 3000.0, 3600.0, 22.0e-9, 22.0e-9 };
+              constexpr RcPair hf02   { 4300.0, 5100.0,  2.2e-9,  2.2e-9 };
+              constexpr RcPair hf242  { 3000.0, 3600.0,  2.2e-9,  2.2e-9 };
+              constexpr RcPair lf02   { 4300.0, 5100.0, 33.0e-9, 47.0e-9 };
+              constexpr RcPair lf242  { 4300.0, 4700.0, 33.0e-9, 47.0e-9 };
+
+              static double geometricCorner (const RcPair& rc)
+              {
+                  return 1.0 / (2.0 * pi * std::sqrt ((rc.r1 * rc.c1) * (rc.r2 * rc.c2)));
+              }
+
+              static CoeffPtr biquadFromAnalog (double sr,
+                                                double b2, double b1, double b0,
+                                                double a2, double a1, double a0,
+                                                double prewarpHz)
+              {
+                  prewarpHz = juce::jlimit (1.0, sr * 0.45, prewarpHz);
+                  const double K = 2.0 * sr * std::tan (pi * prewarpHz / sr)
+                                   / (2.0 * pi * prewarpHz);
+                  const double k = 2.0 * sr / K;
+                  const double B0 = b2*k*k + b1*k + b0;
+                  const double B1 = 2.0*(b0 - b2*k*k);
+                  const double B2 = b2*k*k - b1*k + b0;
+                  const double A0 = a2*k*k + a1*k + a0;
+                  const double A1 = 2.0*(a0 - a2*k*k);
+                  const double A2 = a2*k*k - a1*k + a0;
+                  return new Coeff ((float)(B0/A0), (float)(B1/A0), (float)(B2/A0),
+                                    1.0f, (float)(A1/A0), (float)(A2/A0));
+              }
+
+              static CoeffPtr reciprocalBell (double sr, float hz, float q, float gainDb,
+                                              const RcPair& rc)
+              {
+                  const double f = juce::jlimit (10.0, sr * 0.45, (double) hz);
+                  const double w = 2.0 * pi * f;
+                  const double Q = juce::jmax (0.05, (double) q);
+                  const double G = std::pow (10.0, std::abs ((double) gainDb) / 20.0);
+                  const double rcReference = geometricCorner (rc);
+                  juce::ignoreUnused (rcReference);
+                  if (gainDb >= 0.0f)
+                      return biquadFromAnalog (sr, 1.0, G*w/Q, w*w, 1.0, w/Q, w*w, f);
+                  return biquadFromAnalog (sr, 1.0, w/Q, w*w, 1.0, G*w/Q, w*w, f);
+              }
+
+              static CoeffPtr lowShelfE (double sr, float hz, float gainDb)
+              {
+                  const double f = juce::jlimit (10.0, sr * 0.45, (double) hz);
+                  const double w = 2.0 * pi * f;
+                  const double G = std::pow (10.0, std::abs ((double) gainDb) / 20.0);
+                  if (gainDb >= 0.0f)
+                      return biquadFromAnalog (sr, 0.0, 1.0, G*w, 0.0, 1.0, w, f);
+                  return biquadFromAnalog (sr, 0.0, 1.0, w, 0.0, 1.0, G*w, f);
+              }
+
+              static CoeffPtr highShelfE (double sr, float hz, float gainDb)
+              {
+                  const double f = juce::jlimit (10.0, sr * 0.45, (double) hz);
+                  const double w = 2.0 * pi * f;
+                  const double G = std::pow (10.0, std::abs ((double) gainDb) / 20.0);
+                  if (gainDb >= 0.0f)
+                      return biquadFromAnalog (sr, 0.0, G, w, 0.0, 1.0, w, f);
+                  return biquadFromAnalog (sr, 0.0, 1.0, w, 0.0, G, w, f);
+              }
+          }
+
+          '''
+          dsp.write_text(s.replace(anchor, helpers + anchor, 1))
+
+          s = dsp.read_text()
+          a = s.index("void DspEngine::setFilterTargets (const Params& p)")
+          b = s.index("\nvoid DspEngine::moveCoefficientsTowards", a)
+          replacement = r'''void DspEngine::setFilterTargets (const Params& p)
+          {
+              using namespace ssl4000e;
+              const float ny = static_cast<float> (0.45 * sr);
+
+              const float lfHz  = juce::jlimit (p.blackEq ? 40.0f : 30.0f, 450.0f, p.lfFreq);
+              const float lmfHz = juce::jlimit (p.blackEq ? 160.0f : 200.0f,
+                                                p.blackEq ? 2200.0f : 2500.0f, p.lmfFreq);
+              const float hmfHz = juce::jlimit (600.0f, p.blackEq ? 10000.0f : 7000.0f, p.hmfFreq);
+              const float hfHz  = juce::jlimit (1500.0f, p.blackEq ? 20000.0f : 16000.0f, p.hfFreq);
+
+              const float lq = juce::jlimit (0.5f, 4.5f, p.lmfQ);
+              const float hq = juce::jlimit (0.5f, 4.5f, p.hmfQ);
+
+              const auto clampSigned = [] (float x, float m) { return juce::jlimit (-m, m, x); };
+              const auto blackMidGain = [&] (float x, float q)
+              {
+                  const float t = (juce::jlimit (0.5f, 4.5f, q) - 0.5f) / 4.0f;
+                  return clampSigned (x, 15.0f + 3.0f * t);
+              };
+
+              const float lfGain = clampSigned (p.lfGain, p.blackEq && p.lfBell ? 18.0f : 15.0f);
+              const float hfGain = clampSigned (p.hfGain, p.blackEq && p.hfBell ? 18.0f : 15.0f);
+              const float lmGain = p.blackEq ? blackMidGain (p.lmfGain, lq) : clampSigned (p.lmfGain, 15.0f);
+              const float hmGain = p.blackEq ? blackMidGain (p.hmfGain, hq) : clampSigned (p.hmfGain, 15.0f);
+
+              const RcPair& lfRc  = p.blackEq ? lf242  : lf02;
+              const RcPair& lmfRc = p.blackEq ? lmf242 : lmf02;
+              const RcPair& hmfRc = p.blackEq ? hmf242 : hmf02;
+              const RcPair& hfRc  = p.blackEq ? hf242  : hf02;
+
+              lfTarget = p.lfBell
+                  ? reciprocalBell (sr, lfHz, p.blackEq ? 1.70f : 0.80f, lfGain, lfRc)
+                  : lowShelfE (sr, lfHz, lfGain);
+              lmfTarget = reciprocalBell (sr, lmfHz, lq, lmGain, lmfRc);
+              hmfTarget = reciprocalBell (sr, hmfHz, hq, hmGain, hmfRc);
+              hfTarget = p.hfBell
+                  ? reciprocalBell (sr, hfHz, p.blackEq ? 1.00f : 0.80f, hfGain, hfRc)
+                  : highShelfE (sr, hfHz, hfGain);
+
+              const float hpHz = juce::jlimit (16.0f, juce::jmin (350.0f, ny), p.hpFreq);
+              const float lpHz = juce::jlimit (3000.0f, ny, p.lpFreq);
+              hp1Target = Coefficients::makeFirstOrderHighPass (sr, hpHz);
+              hp2Target = Coefficients::makeHighPass (sr, hpHz, 0.70710678f);
+              lpTarget  = Coefficients::makeLowPass (sr, lpHz, 0.70710678f);
+
+              lfDipTarget = Coefficients::makePeakFilter (sr, juce::jmin (lfHz * 2.0f, ny), 0.707f, 1.0f);
+              hfDipTarget = Coefficients::makePeakFilter (sr, juce::jmax (hfHz * 0.5f, 20.0f), 0.707f, 1.0f);
+              lastFilterParams = p;
+              filterCacheValid = true;
+          }
+          '''
+          dsp.write_text(s[:a] + replacement + s[b:])
+
+          s = dsp.read_text()
+          a = s.index("void DspEngine::processFilters (juce::AudioBuffer<float>& buffer, const Params& p)")
+          b = s.index("\nvoid DspEngine::processEQ", a)
+          pf = r'''void DspEngine::processFilters (juce::AudioBuffer<float>& buffer, const Params& p)
+          {
+              if (p.hpOn)
+              {
+                  runFilter (hp2, buffer);
+                  if (p.blackEq)
+                      runFilter (hp1, buffer);
+              }
+              if (p.lpOn)
+                  runFilter (lp, buffer);
+          }
+          '''
+          s = s[:a] + pf + s[b:]
+          s = s.replace("        if (! p.lfBell) runFilter (lfDip, buffer);\n", "")
+          s = s.replace("        if (! p.hfBell) runFilter (hfDip, buffer);\n", "")
+          dsp.write_text(s)
+
+          ps = proc.read_text()
+          pairs = [
+              ('"hfFreq", "HF Frequency", 1500.0f, 16000.0f','"hfFreq", "HF Frequency", 1500.0f, 20000.0f'),
+              ('"hfGain", "HF Gain", -15.0f, 15.0f','"hfGain", "HF Gain", -18.0f, 18.0f'),
+              ('"hmfFreq", "HMF Frequency", 600.0f, 7000.0f','"hmfFreq", "HMF Frequency", 600.0f, 10000.0f'),
+              ('"hmfGain", "HMF Gain", -15.0f, 15.0f','"hmfGain", "HMF Gain", -18.0f, 18.0f'),
+              ('"hmfQ", "HMF Q", 0.40f, 4.0f','"hmfQ", "HMF Q", 0.50f, 4.5f'),
+              ('"lmfFreq", "LMF Frequency", 200.0f, 2500.0f','"lmfFreq", "LMF Frequency", 160.0f, 2500.0f'),
+              ('"lmfGain", "LMF Gain", -15.0f, 15.0f','"lmfGain", "LMF Gain", -18.0f, 18.0f'),
+              ('"lmfQ", "LMF Q", 0.40f, 4.0f','"lmfQ", "LMF Q", 0.50f, 4.5f'),
+              ('"lfGain", "LF Gain", -15.0f, 15.0f','"lfGain", "LF Gain", -18.0f, 18.0f'),
+          ]
+          for old,new in pairs:
+              if old not in ps:
+                  raise SystemExit("Missing parameter declaration: " + old)
+              ps = ps.replace(old,new,1)
+          proc.write_text(ps)
+
+          es = edt.read_text()
+          for old,new in [
+              ("Console Channel Strip X v0.2.8","Console Channel Strip X v0.4.0"),
+              ("CCS X v0.2.8","CCS X v0.4.0"),
+              ('"1.5k", "16k"','"1.5k", "20k"'),
+              ('"0.6k", "7k"','"0.6k", "10k"'),
+              ('"0.4", "4"','"0.5", "4.5"'),
+              ('"0.2k", "2.5k"','"0.16k", "2.5k"'),
+              ('76, 530, 88, 78','70, 526, 98, 86'),
+              ('178, 530, 88, 78','174, 526, 98, 86'),
+              ('66, 622, 82, 78','60, 618, 90, 86'),
+              ('158, 622, 82, 78','156, 618, 90, 86'),
+              ('250, 622, 82, 78','252, 618, 90, 86'),
+              ('66, 714, 82, 78','60, 710, 90, 86'),
+              ('158, 714, 82, 78','156, 710, 90, 86'),
+              ('250, 714, 82, 78','252, 710, 90, 86'),
+              ('76, 806, 88, 78','70, 802, 98, 86'),
+              ('178, 806, 88, 78','174, 802, 98, 86')]:
+              es = es.replace(old,new)
+          es = es.replace('ValueStyle::dB, "-15", "+15"','ValueStyle::dB, "-18", "+18"')
+          edt.write_text(es)
+
+          gui.write_text(gui.read_text().replace("gui-preview-v0.2.8.png","gui-preview-v0.4.0.png"))
+          tst.write_text(tst.read_text().replace("All v0.2.8 DSP behaviour tests passed.","All v0.4.0 DSP behaviour tests passed."))
+          print("v0.4.0 SSL E circuit-derived EQ patch complete")
+          PY
+          python3 /tmp/patch_ssl_eq.py
+
+      - name: Verify SSL band design path
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          s=(Path(os.environ['ROOT'])/'src/DspEngine.cpp').read_text()
+          a=s.index('void DspEngine::setFilterTargets')
+          b=s.index('void DspEngine::moveCoefficientsTowards',a)
+          block=s[a:b]
+          for tok in ['reciprocalBell','lowShelfE','highShelfE','lfTarget','lmfTarget','hmfTarget','hfTarget']:
+              assert tok in block, tok
+          assert 'lfTarget = Coefficients::make' not in block
+          assert 'lmfTarget = Coefficients::make' not in block
+          assert 'hmfTarget = Coefficients::make' not in block
+          assert 'hfTarget = Coefficients::make' not in block
+          print('PASS: no stock JUCE EQ designer is used for LF/LMF/HMF/HF')
+          PY
+
+      - name: Mathematical amplitude and phase regression
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import cmath, math, csv
+          sr=48000.0
+          def bilinear(b2,b1,b0,a2,a1,a0,f0):
+              K=2*sr*math.tan(math.pi*f0/sr)/(2*math.pi*f0); k=2*sr/K
+              B0=b2*k*k+b1*k+b0; B1=2*(b0-b2*k*k); B2=b2*k*k-b1*k+b0
+              A0=a2*k*k+a1*k+a0; A1=2*(a0-a2*k*k); A2=a2*k*k-a1*k+a0
+              return [B0/A0,B1/A0,B2/A0,A1/A0,A2/A0]
+          def bell(f0,q,db):
+              w=2*math.pi*f0; G=10**(abs(db)/20)
+              if db>=0: return bilinear(1,G*w/q,w*w,1,w/q,w*w,f0)
+              return bilinear(1,w/q,w*w,1,G*w/q,w*w,f0)
+          def H(c,f):
+              z=cmath.exp(1j*2*math.pi*f/sr); z1=1/z; z2=z1*z1
+              return (c[0]+c[1]*z1+c[2]*z2)/(1+c[3]*z1+c[4]*z2)
+          cases=[('HF bell',10000,1.0,18),('LF bell',100,1.7,18),('HMF lowQ',2500,.5,15),('HMF highQ',2500,4.5,18),('LMF lowQ',500,.5,15),('LMF highQ',500,4.5,18)]
+          rows=[]
+          for name,f0,q,g in cases:
+              hp=H(bell(f0,q,g),f0); hc=H(bell(f0,q,-g),f0)
+              bp=20*math.log10(abs(hp)); bc=20*math.log10(abs(hc))
+              if abs(bp-g)>.08 or abs(bc+g)>.08 or abs(bp+bc)>.08:
+                  raise SystemExit(f'{name} regression failed: {bp:.3f}/{bc:.3f}')
+              rows.append([name,f0,q,g,bp,bc,math.degrees(cmath.phase(hp)),math.degrees(cmath.phase(hc))])
+          with open('ssl-eq-v040-regression.csv','w',newline='') as f:
+              w=csv.writer(f); w.writerow(['case','Hz','Q','target_dB','boost_dB','cut_dB','boost_phase_deg','cut_phase_deg']); w.writerows(rows)
+          print('PASS: reciprocal amplitude/phase and Rev.4 calibration regression')
+          PY
+
+      - name: Configure Intel macOS 10.13
+        run: >
+          cmake -S "$ROOT" -B build -G Xcode
+          -DCMAKE_OSX_ARCHITECTURES=x86_64
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build and run DSP smoke tests
+        shell: bash
+        run: |
+          cmake --build build --config Release --target ConsoleChannelStripXSmokeTests --parallel 4
+          TEST=$(find build -type f -name ConsoleChannelStripXSmokeTests -perm +111 -print -quit)
+          test -n "$TEST"
+          "$TEST" | tee dsp-v040.txt
+
+      - name: Build and run GUI smoke tests
+        shell: bash
+        run: |
+          cmake --build build --config Release --target ConsoleChannelStripXGuiSmokeTests --parallel 4
+          TEST=$(find build -type f -name ConsoleChannelStripXGuiSmokeTests -perm +111 -print -quit)
+          test -n "$TEST"
+          "$TEST" | tee gui-v040.txt
+          test -f gui-preview-v0.4.0.png
+
+      - name: Build VST3
+        run: cmake --build build --config Release --target ConsoleChannelStripX_VST3 --parallel 4
+
+      - name: Verify binary and deployment target
+        shell: bash
+        run: |
+          VST=$(find build -type d -name 'Console Channel Strip X.vst3' -print -quit)
+          test -n "$VST"
+          BIN="$VST/Contents/MacOS/Console Channel Strip X"
+          file "$BIN" | tee binary-v040.txt
+          file "$BIN" | grep -q x86_64
+          xcrun vtool -show-build "$BIN" | tee deployment-v040.txt
+          grep -q "minos 10.13" deployment-v040.txt
+
+      - name: Package
+        shell: bash
+        run: |
+          VST=$(find build -type d -name 'Console Channel Strip X.vst3' -print -quit)
+          ditto -c -k --sequesterRsrc --keepParent "$VST" ConsoleChannelStrip-X-v0.4.0-macOS-Intel.zip
+          ditto -c -k --sequesterRsrc --keepParent "$ROOT" ConsoleChannelStrip-X-v0.4.0-source.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ConsoleChannelStrip-X-v0.4.0-SSL-E-Circuit-EQ-macOS-Intel
+          path: |
+            ConsoleChannelStrip-X-v0.4.0-macOS-Intel.zip
+            ConsoleChannelStrip-X-v0.4.0-source.zip
+            gui-preview-v0.4.0.png
+            ssl-eq-v040-regression.csv
+            dsp-v040.txt
+            gui-v040.txt
+            binary-v040.txt
+            deployment-v040.txt
+          if-no-files-found: error
+          retention-days: 30
