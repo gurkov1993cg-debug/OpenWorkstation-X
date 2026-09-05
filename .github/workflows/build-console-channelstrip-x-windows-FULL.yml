@@ -1,0 +1,113 @@
+name: Build Console Channel Strip X v0.4.1 Windows x64
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'ConsoleChannelStrip-X-v0.4.1-Wien-RC-source.zip'
+      - '.github/workflows/build-console-channelstrip-x-windows-FULL.yml'
+
+concurrency:
+  group: console-channelstrip-x-v041-windows
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Expand v0.4.1 source
+        shell: pwsh
+        run: |
+          $zip = 'ConsoleChannelStrip-X-v0.4.1-Wien-RC-source.zip'
+          if (-not (Test-Path $zip)) { throw 'v0.4.1 source ZIP not found' }
+          Remove-Item -Recurse -Force channelstrip-src -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path channelstrip-src | Out-Null
+          Expand-Archive -Path $zip -DestinationPath channelstrip-src -Force
+          $cmakeFile = Get-ChildItem channelstrip-src -Recurse -File -Filter CMakeLists.txt | Select-Object -First 1
+          if (-not $cmakeFile) { throw 'CMake root not found in v0.4.1 ZIP' }
+          $root = $cmakeFile.DirectoryName
+          "PROJECT_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Project root: $root"
+
+      - name: Configure Windows x64 VST3 and C++ tests
+        shell: pwsh
+        run: |
+          cmake -S "$env:PROJECT_ROOT" -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build DSP and RC tests
+        shell: pwsh
+        run: cmake --build build --config Release --target ConsoleChannelStripXSmokeTests --parallel 4
+
+      - name: Run DSP and RC tests
+        shell: pwsh
+        run: |
+          $test = Get-ChildItem build -Recurse -File -Filter ConsoleChannelStripXSmokeTests.exe | Where-Object { $_.FullName -match '\\Release\\' } | Select-Object -First 1
+          if (-not $test) { throw 'DSP/RC test executable not found' }
+          & $test.FullName 2>&1 | Tee-Object -FilePath parameter-smoke-tests.txt
+          if ($LASTEXITCODE -ne 0) { throw "DSP/RC tests failed with exit code $LASTEXITCODE" }
+
+      - name: Build GUI smoke test
+        shell: pwsh
+        run: cmake --build build --config Release --target ConsoleChannelStripXGuiSmokeTests --parallel 4
+
+      - name: Run GUI smoke test
+        shell: pwsh
+        run: |
+          $gui = Get-ChildItem build -Recurse -File -Filter ConsoleChannelStripXGuiSmokeTests.exe | Where-Object { $_.FullName -match '\\Release\\' } | Select-Object -First 1
+          if (-not $gui) { throw 'GUI smoke-test executable not found' }
+          & $gui.FullName 2>&1 | Tee-Object -FilePath gui-layout-smoke-tests.txt
+          if ($LASTEXITCODE -ne 0) { throw "GUI smoke tests failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path gui-preview-v0.4.1.png)) { throw 'GUI preview was not rendered' }
+
+      - name: Build VST3
+        shell: pwsh
+        run: cmake --build build --config Release --target ConsoleChannelStripX_VST3 --parallel 4
+
+      - name: Verify Windows x64 VST3
+        shell: pwsh
+        run: |
+          $vst = Get-ChildItem build -Recurse -Directory -Filter 'Console Channel Strip X.vst3' | Select-Object -First 1
+          if (-not $vst) { throw 'VST3 bundle not found' }
+          $bin = Get-ChildItem $vst.FullName -Recurse -File -Filter 'Console Channel Strip X.vst3' | Select-Object -First 1
+          if (-not $bin) { throw 'VST3 executable not found inside bundle' }
+          $bytes = [System.IO.File]::ReadAllBytes($bin.FullName)
+          if ($bytes.Length -lt 256) { throw 'VST3 executable is unexpectedly small' }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          $machineText = ('0x{0:X4}' -f $machine)
+          "Bundle: $($vst.FullName)" | Tee-Object -FilePath binary-info.txt
+          "Binary: $($bin.FullName)" | Tee-Object -FilePath binary-info.txt -Append
+          "PE machine: $machineText" | Tee-Object -FilePath binary-info.txt -Append
+          if ($machine -ne 0x8664) { throw "ERROR: binary is not Windows AMD64/x64 (machine=$machineText)" }
+
+      - name: Collect Windows artifact
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force artifact -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path artifact | Out-Null
+          $vst = Get-ChildItem build -Recurse -Directory -Filter 'Console Channel Strip X.vst3' | Select-Object -First 1
+          if (-not $vst) { throw 'VST3 bundle not found during artifact collection' }
+          Copy-Item -Path $vst.FullName -Destination 'artifact\Console Channel Strip X.vst3' -Recurse -Force
+          Copy-Item parameter-smoke-tests.txt, gui-layout-smoke-tests.txt, gui-preview-v0.4.1.png, binary-info.txt -Destination artifact
+          Compress-Archive -Path 'artifact\Console Channel Strip X.vst3' -DestinationPath 'ConsoleChannelStrip-X-v0.4.1-Windows-x64.zip' -CompressionLevel Optimal -Force
+
+      - name: Upload Windows x64 VST3
+        uses: actions/upload-artifact@v4
+        with:
+          name: ConsoleChannelStrip-X-v0.4.1-Windows-x64
+          path: |
+            ConsoleChannelStrip-X-v0.4.1-Windows-x64.zip
+            artifact/binary-info.txt
+            artifact/parameter-smoke-tests.txt
+            artifact/gui-layout-smoke-tests.txt
+            artifact/gui-preview-v0.4.1.png
+          if-no-files-found: error
+          retention-days: 30
