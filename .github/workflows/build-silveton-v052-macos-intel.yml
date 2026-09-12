@@ -122,16 +122,67 @@ jobs:
           cmake.write_text(s)
 
           editor = (root / 'src/PluginEditor.cpp').read_text()
-          required = ['BinaryData::approved_visual_reference_png', 'SATURATION', 'TUBE', 'TAPE', 'SOLID STATE', 'MID / SIDE', 'BASS MONO', 'KNEE', 'MAKEUP']
-          for word in required:
+          processor = (root / 'src/PluginProcessor.cpp').read_text()
+          gui_test = (root / 'tests/GuiLayoutSmokeTests.cpp').read_text()
+
+          editor_required = [
+              'BinaryData::approved_visual_reference_png',
+              'addToggle ("saturationOn", "POWER")',
+              'addChoice ("satType", { "TUBE", "TAPE", "SOLID STATE" })',
+              'addChoice ("stereoMode", { "STEREO", "MID / SIDE" })',
+              'addChoice ("bassMono", { "OFF", "80 Hz", "120 Hz", "200 Hz" })',
+              'addChoice ("gateExpand", { "GATE", "EXPAND" })',
+              'compInButton.setComponentID ("compOn__in")',
+              'drawReductionMeter', 'drawStereoMeter'
+          ]
+          for word in editor_required:
               if word not in editor:
-                  raise SystemExit('Approved feature missing from GUI source: ' + word)
+                  raise SystemExit('Approved live GUI feature missing from source: ' + word)
+
+          if 'addToggle ("bypass",' in editor:
+              raise SystemExit('Global bypass was incorrectly added as a visible control; it is not on the approved face')
+
+          processor_required = [
+              'detector.getSample',
+              'storePeakMax',
+              'compExtensionPeakReductionDb',
+              'gateExtensionPeakReductionDb',
+              'compressorPeakReductionMeter()',
+              'gatePeakReductionMeter()'
+          ]
+          for word in processor_required:
+              if word not in processor:
+                  raise SystemExit('Required functional/meter implementation missing: ' + word)
+
+          for word in ['approvedHits[]',
+                       'approved visible control has wrong hit region',
+                       'Input L meter is not calibrated to real dBFS peak',
+                       'Output L meter does not equal the actual processed peak',
+                       'Compressor GR meter is not driven by real gain reduction',
+                       'Gate GR meter is not driven by real gain reduction',
+                       'Compressor IN key is not attached to compOn']:
+              if word not in gui_test:
+                  raise SystemExit('Mandatory functional test missing: ' + word)
 
           skin = root / 'src/approved_visual_reference.png'
           if skin.stat().st_size < 1000000:
               raise SystemExit('Approved skin asset is missing or unexpectedly small')
-          print('PASS: exact approved 1536x1024 skin installed and bound into GUI')
+          import hashlib
+          digest = hashlib.sha256(skin.read_bytes()).hexdigest()
+          expected = '0bd777e5940f1870638359325a7b2aea000522baee8d36652294c39f9863fbe2'
+          if digest != expected:
+              raise SystemExit(f'Approved skin changed: {digest}')
+          print('PASS: exact approved skin hash and all mandatory live-control/meter code are installed')
           PYCODE
+
+      - name: Verify approved skin dimensions
+        shell: bash
+        run: |
+          set -euo pipefail
+          W=$(sips -g pixelWidth "$PROJECT_ROOT/src/approved_visual_reference.png" | awk '/pixelWidth/ {print $2}')
+          H=$(sips -g pixelHeight "$PROJECT_ROOT/src/approved_visual_reference.png" | awk '/pixelHeight/ {print $2}')
+          test "$W" = "1536" && test "$H" = "1024" || { echo "Approved skin is ${W}x${H}, expected 1536x1024"; exit 1; }
+          echo 'PASS: approved skin is exactly 1536x1024'
 
       - name: Verify locked v0.4.1 core DSP stayed byte-identical
         shell: bash
@@ -172,6 +223,19 @@ jobs:
           test -n "$GUI_TEST" || { echo 'GUI test executable not found'; exit 1; }
           "$GUI_TEST" | tee gui-functional-tests.txt
           test -f gui-preview-silveton-v0.5.2.png || { echo 'Silveton v0.5.2 preview PNG was not rendered'; exit 1; }
+
+      - name: Upload functional diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Silveton-v0.5.2-failure-diagnostics
+          if-no-files-found: warn
+          path: |
+            parameter-smoke-tests.txt
+            gui-functional-tests.txt
+            gui-preview-silveton-v0.5.2.png
+            dsp-core-hashes-before.txt
+            dsp-core-hashes-after.txt
 
       - name: Build Silveton VST3
         shell: bash
