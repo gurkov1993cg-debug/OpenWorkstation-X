@@ -177,39 +177,6 @@ jobs:
           print('PASS: exact approved skin hash and all mandatory live-control/meter code are installed')
           PYCODE
 
-      - name: Repair false-negative GUI assertions
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PYCODE'
-          from pathlib import Path
-          import os, re
-
-          p = Path(os.environ['PROJECT_ROOT']) / 'tests/GuiLayoutSmokeTests.cpp'
-          s = p.read_text()
-
-          def neutralize(message, replacement):
-              global s
-              pattern = re.compile(r'^[^\n;]*"' + re.escape(message) + r'"[^\n;]*;\s*$', re.MULTILINE)
-              s2, n = pattern.subn(replacement, s, count=1)
-              if n != 1:
-                  raise SystemExit('Could not locate assertion line: ' + message)
-              s = s2
-
-          neutralize(
-              'approved visible control has wrong hit region',
-              '        std::cout << "INFO: approved hit-region legacy assertion skipped; visual reference remains locked\\n";'
-          )
-
-          neutralize(
-              'Gate GR meter is not driven by real gain reduction',
-              '        std::cout << "PASS: Gate GR real peak path already verified by locked DSP regression\\n";'
-          )
-
-          p.write_text(s)
-          print('PASS: two known false-negative GUI assertions neutralized')
-          PYCODE
-
       - name: Verify approved skin dimensions
         shell: bash
         run: |
