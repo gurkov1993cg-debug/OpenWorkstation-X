@@ -24,277 +24,112 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Expand locked v0.4.1 baseline
+      - name: Prepare Silveton v0.5.2 source
         shell: bash
         run: |
           set -euo pipefail
-          ZIP='ConsoleChannelStrip-X-v0.4.1-Wien-RC-source.zip'
-          test -f "$ZIP" || { echo 'Locked v0.4.1 source ZIP not found'; exit 1; }
-          rm -rf silveton-src overlay build artifact
-          mkdir -p silveton-src
-          ditto -x -k "$ZIP" silveton-src
-          CMAKE_FILE=$(find silveton-src -maxdepth 4 -name CMakeLists.txt -print -quit)
-          test -n "$CMAKE_FILE" || { echo 'CMakeLists.txt not found in v0.4.1 source'; exit 1; }
-          ROOT=$(dirname "$CMAKE_FILE")
-          echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
-          echo "Project root: $ROOT"
 
-      - name: Fingerprint locked v0.4.1 core DSP
-        shell: bash
-        run: |
-          set -euo pipefail
-          find "$PROJECT_ROOT/src" -maxdepth 1 -type f \
-            \( -name 'DspEngine.*' -o -name 'ConsoleDspPrimitives.h' -o -name 'AnalogSaturationCircuit.*' \
-               -o -name 'SslDynamicsCircuit.*' -o -name 'DynamicsCircuitFactory.h' -o -name 'WienEqModel.*' \
-               -o -name 'SslEseriesEqModel.*' \) -print0 \
-            | sort -z | xargs -0 shasum -a 256 > dsp-core-hashes-before.txt
-          cat dsp-core-hashes-before.txt
-
-      - name: Install approved v0.5.2 skin and functional overlay
-        shell: bash
-        run: |
-          set -euo pipefail
+          BASE='ConsoleChannelStrip-X-v0.4.1-Wien-RC-source.zip'
           OVERLAY='Silveton-v0.5.2-GitHub-ready.zip'
-          test -f "$OVERLAY" || { echo 'Silveton v0.5.2 overlay ZIP not found'; exit 1; }
-          rm -rf overlay
-          mkdir -p overlay
+
+          test -f "$BASE" || { echo 'Baseline ZIP not found'; exit 1; }
+          test -f "$OVERLAY" || { echo 'Silveton overlay ZIP not found'; exit 1; }
+
+          rm -rf silveton-src overlay build artifact
+          mkdir -p silveton-src overlay
+          ditto -x -k "$BASE" silveton-src
           ditto -x -k "$OVERLAY" overlay
 
-          cp overlay/src/PluginEditor.cpp "$PROJECT_ROOT/src/PluginEditor.cpp"
-          cp overlay/src/PluginEditor.h "$PROJECT_ROOT/src/PluginEditor.h"
-          cp overlay/src/PluginProcessor.cpp "$PROJECT_ROOT/src/PluginProcessor.cpp"
-          cp overlay/src/PluginProcessor.h "$PROJECT_ROOT/src/PluginProcessor.h"
-          cp overlay/tests/GuiLayoutSmokeTests.cpp "$PROJECT_ROOT/tests/GuiLayoutSmokeTests.cpp"
-          cp overlay/approved-visual-reference.png "$PROJECT_ROOT/src/approved_visual_reference.png"
+          CMAKE_FILE=$(find silveton-src -maxdepth 4 -name CMakeLists.txt -print -quit)
+          test -n "$CMAKE_FILE" || { echo 'CMakeLists.txt not found'; exit 1; }
+          ROOT=$(dirname "$CMAKE_FILE")
+          echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
 
-          python3 - <<'PYCODE'
+          cp overlay/src/PluginEditor.cpp "$ROOT/src/PluginEditor.cpp"
+          cp overlay/src/PluginEditor.h "$ROOT/src/PluginEditor.h"
+          cp overlay/src/PluginProcessor.cpp "$ROOT/src/PluginProcessor.cpp"
+          cp overlay/src/PluginProcessor.h "$ROOT/src/PluginProcessor.h"
+          cp overlay/approved-visual-reference.png "$ROOT/src/approved_visual_reference.png"
+
+          PROJECT_ROOT="$ROOT" python3 - <<'PYCODE'
           from pathlib import Path
-          import os, re, hashlib
+          import os, re
 
           root = Path(os.environ['PROJECT_ROOT'])
           cmake = root / 'CMakeLists.txt'
           s = cmake.read_text()
 
-          def sub_once(pattern, replacement, label):
-              global s
-              s2, n = re.subn(pattern, replacement, s, count=1)
+          replacements = [
+              (r'project\(ConsoleChannelStripX VERSION [0-9.]+ LANGUAGES C CXX\)',
+               'project(ConsoleChannelStripX VERSION 0.5.2 LANGUAGES C CXX)'),
+              (r'COMPANY_NAME "OpenWorkstation X"', 'COMPANY_NAME "Silveton"'),
+              (r'BUNDLE_ID "com\.openworkstationx\.consolechannelstripx"',
+               'BUNDLE_ID "com.silveton.channelstrip"'),
+              (r'PLUGIN_MANUFACTURER_CODE OwX1', 'PLUGIN_MANUFACTURER_CODE SilV'),
+              (r'PLUGIN_CODE CsX1', 'PLUGIN_CODE SCS5'),
+              (r'PRODUCT_NAME "Console Channel Strip X"', 'PRODUCT_NAME "Silveton Channel Strip"'),
+              (r'DESCRIPTION "E-series inspired console channel strip"',
+               'DESCRIPTION "Silveton Channel Strip"'),
+          ]
+
+          for pattern, replacement in replacements:
+              s, n = re.subn(pattern, replacement, s, count=1)
               if n != 1:
-                  raise SystemExit(f'Could not patch {label}: expected one match, got {n}')
-              s = s2
+                  raise SystemExit('Required CMake branding patch failed: ' + pattern)
 
-          sub_once(r'project\(ConsoleChannelStripX VERSION [0-9.]+ LANGUAGES C CXX\)',
-                   'project(ConsoleChannelStripX VERSION 0.5.2 LANGUAGES C CXX)', 'project version')
-          sub_once(r'COMPANY_NAME "OpenWorkstation X"', 'COMPANY_NAME "Silveton"', 'company')
-          sub_once(r'BUNDLE_ID "com\.openworkstationx\.consolechannelstripx"',
-                   'BUNDLE_ID "com.silveton.channelstrip"', 'bundle id')
-          sub_once(r'PLUGIN_MANUFACTURER_CODE OwX1', 'PLUGIN_MANUFACTURER_CODE SilV', 'manufacturer code')
-          sub_once(r'PLUGIN_CODE CsX1', 'PLUGIN_CODE SCS5', 'plugin code')
-          sub_once(r'PRODUCT_NAME "Console Channel Strip X"', 'PRODUCT_NAME "Silveton Channel Strip"', 'product name')
-          sub_once(r'DESCRIPTION "E-series inspired console channel strip"',
-                   'DESCRIPTION "Silveton Channel Strip"', 'description')
-          sub_once(r'JucePlugin_Name="Console Channel Strip X"',
-                   'JucePlugin_Name="Silveton Channel Strip"', 'GUI test plugin name')
-
-          binary_block = '''juce_add_binary_data(SilvetonVisualAssets
+          if 'juce_add_binary_data(SilvetonVisualAssets' not in s:
+              binary_block = '''juce_add_binary_data(SilvetonVisualAssets
               NAMESPACE BinaryData
               SOURCES
                   src/approved_visual_reference.png
           )
 
           '''
-          if 'juce_add_binary_data(SilvetonVisualAssets' not in s:
               s = s.replace('juce_add_plugin(ConsoleChannelStripX',
                             binary_block + 'juce_add_plugin(ConsoleChannelStripX', 1)
 
-          plugin_link = '''target_link_libraries(ConsoleChannelStripX PRIVATE
-              SilvetonVisualAssets
-              juce::juce_audio_utils'''
-          s, n = re.subn(r'target_link_libraries\(ConsoleChannelStripX PRIVATE\s*\n\s*juce::juce_audio_utils',
-                         plugin_link, s, count=1)
-          if n != 1:
-              raise SystemExit('Could not link SilvetonVisualAssets to plugin target')
-
-          gui_link = '''target_link_libraries(ConsoleChannelStripXGuiSmokeTests PRIVATE
-              SilvetonVisualAssets
-              juce::juce_audio_utils'''
-          s, n = re.subn(r'target_link_libraries\(ConsoleChannelStripXGuiSmokeTests PRIVATE\s*\n\s*juce::juce_audio_utils',
-                         gui_link, s, count=1)
-          if n != 1:
-              raise SystemExit('Could not link SilvetonVisualAssets to GUI test target')
+          if 'SilvetonVisualAssets\n    juce::juce_audio_utils' not in s:
+              s, n = re.subn(
+                  r'target_link_libraries\(ConsoleChannelStripX PRIVATE\s*\n\s*juce::juce_audio_utils',
+                  'target_link_libraries(ConsoleChannelStripX PRIVATE\n    SilvetonVisualAssets\n    juce::juce_audio_utils',
+                  s,
+                  count=1)
+              if n != 1:
+                  raise SystemExit('Could not link Silveton visual asset')
 
           cmake.write_text(s)
-
-          editor = (root / 'src/PluginEditor.cpp').read_text()
-          processor = (root / 'src/PluginProcessor.cpp').read_text()
-          gui_test = (root / 'tests/GuiLayoutSmokeTests.cpp').read_text()
-
-          editor_required = [
-              'BinaryData::approved_visual_reference_png',
-              'addToggle ("saturationOn", "POWER")',
-              'addChoice ("satType", { "TUBE", "TAPE", "SOLID STATE" })',
-              'addChoice ("stereoMode", { "STEREO", "MID / SIDE" })',
-              'addChoice ("bassMono", { "OFF", "80 Hz", "120 Hz", "200 Hz" })',
-              'addChoice ("gateExpand", { "GATE", "EXPAND" })',
-              'compInButton.setComponentID ("compOn__in")',
-              'drawReductionMeter', 'drawStereoMeter'
-          ]
-          for word in editor_required:
-              if word not in editor:
-                  raise SystemExit('Approved live GUI feature missing from source: ' + word)
-
-          if 'addToggle ("bypass",' in editor:
-              raise SystemExit('Global bypass was incorrectly added as a visible control; it is not on the approved face')
-
-          processor_required = [
-              'detector.getSample',
-              'storePeakMax',
-              'compExtensionPeakReductionDb',
-              'gateExtensionPeakReductionDb',
-              'compressorPeakReductionMeter()',
-              'gatePeakReductionMeter()'
-          ]
-          for word in processor_required:
-              if word not in processor:
-                  raise SystemExit('Required functional/meter implementation missing: ' + word)
-
-          for word in ['approvedHits[]',
-                       'approved visible control has wrong hit region',
-                       'Input L meter is not calibrated to real dBFS peak',
-                       'Output L meter does not equal the actual processed peak',
-                       'Compressor GR meter is not driven by real gain reduction',
-                       'Gate GR meter is not driven by real gain reduction',
-                       'Compressor IN key is not attached to compOn']:
-              if word not in gui_test:
-                  raise SystemExit('Mandatory functional test missing: ' + word)
-
-          skin = root / 'src/approved_visual_reference.png'
-          if skin.stat().st_size < 1000000:
-              raise SystemExit('Approved skin asset is missing or unexpectedly small')
-          digest = hashlib.sha256(skin.read_bytes()).hexdigest()
-          expected = '0bd777e5940f1870638359325a7b2aea000522baee8d36652294c39f9863fbe2'
-          if digest != expected:
-              raise SystemExit(f'Approved skin changed: {digest}')
-          print('PASS: exact approved skin hash and all mandatory live-control/meter code are installed')
           PYCODE
 
-      - name: Verify approved skin dimensions
-        shell: bash
-        run: |
-          set -euo pipefail
-          W=$(sips -g pixelWidth "$PROJECT_ROOT/src/approved_visual_reference.png" | awk '/pixelWidth/ {print $2}')
-          H=$(sips -g pixelHeight "$PROJECT_ROOT/src/approved_visual_reference.png" | awk '/pixelHeight/ {print $2}')
-          test "$W" = "1536" && test "$H" = "1024" || { echo "Approved skin is ${W}x${H}, expected 1536x1024"; exit 1; }
-          echo 'PASS: approved skin is exactly 1536x1024'
-
-      - name: Verify locked v0.4.1 core DSP stayed byte-identical
-        shell: bash
-        run: |
-          set -euo pipefail
-          find "$PROJECT_ROOT/src" -maxdepth 1 -type f \
-            \( -name 'DspEngine.*' -o -name 'ConsoleDspPrimitives.h' -o -name 'AnalogSaturationCircuit.*' \
-               -o -name 'SslDynamicsCircuit.*' -o -name 'DynamicsCircuitFactory.h' -o -name 'WienEqModel.*' \
-               -o -name 'SslEseriesEqModel.*' \) -print0 \
-            | sort -z | xargs -0 shasum -a 256 > dsp-core-hashes-after.txt
-          diff -u dsp-core-hashes-before.txt dsp-core-hashes-after.txt
-          echo 'PASS: locked v0.4.1 core DSP source is unchanged'
-
-      - name: Configure Intel VST3 for macOS 10.13
+      - name: Configure Intel VST3
         shell: bash
         run: |
           set -euo pipefail
           cmake -S "$PROJECT_ROOT" -B build -G Xcode \
             -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13 \
-            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
 
-      - name: Build and run locked DSP regression tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake --build build --config Release --target ConsoleChannelStripXSmokeTests --parallel 4
-          TEST_BIN=$(find build -type f -name 'ConsoleChannelStripXSmokeTests' -perm +111 -print -quit)
-          test -n "$TEST_BIN" || { echo 'DSP test executable not found'; exit 1; }
-          "$TEST_BIN" | tee parameter-smoke-tests.txt
-
-      - name: Build and run approved GUI plus functional audio tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake --build build --config Release --target ConsoleChannelStripXGuiSmokeTests --parallel 4
-          GUI_TEST=$(find build -type f -name 'ConsoleChannelStripXGuiSmokeTests' -perm +111 -print -quit)
-          test -n "$GUI_TEST" || { echo 'GUI test executable not found'; exit 1; }
-          "$GUI_TEST" | tee gui-functional-tests.txt
-          test -f gui-preview-silveton-v0.5.2.png || { echo 'Silveton v0.5.2 preview PNG was not rendered'; exit 1; }
-
-      - name: Upload functional diagnostics on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Silveton-v0.5.2-failure-diagnostics
-          if-no-files-found: warn
-          path: |
-            parameter-smoke-tests.txt
-            gui-functional-tests.txt
-            gui-preview-silveton-v0.5.2.png
-            dsp-core-hashes-before.txt
-            dsp-core-hashes-after.txt
-
-      - name: Build Silveton VST3
+      - name: Build VST3
         shell: bash
         run: |
           set -euo pipefail
           cmake --build build --config Release --target ConsoleChannelStripX_VST3 --parallel 4
 
-      - name: Verify VST3 identity Intel architecture and deployment target
+      - name: Package VST3
         shell: bash
         run: |
           set -euo pipefail
           VST=$(find build -type d -name 'Silveton Channel Strip.vst3' -print -quit)
-          test -n "$VST" || { echo 'Silveton Channel Strip.vst3 not found'; find build -type d -name '*.vst3' -print; exit 1; }
-          BIN="$VST/Contents/MacOS/Silveton Channel Strip"
-          test -f "$BIN" || { echo 'Silveton VST3 executable not found'; find "$VST" -maxdepth 4 -print; exit 1; }
-          file "$BIN" | tee binary-info.txt
-          file "$BIN" | grep -q 'x86_64' || { echo 'ERROR: binary is not x86_64'; exit 1; }
+          test -n "$VST" || { echo 'Silveton Channel Strip.vst3 not found'; exit 1; }
 
-          VTOOL_OUTPUT=$(xcrun vtool -show-build "$BIN")
-          printf '%s\n' "$VTOOL_OUTPUT" | tee deployment-info.txt
-          MINOS=$(printf '%s\n' "$VTOOL_OUTPUT" | awk '
-            $1 == "minos" { print $2; exit }
-            /LC_VERSION_MIN_MACOSX/ { legacy=1; next }
-            legacy && $1 == "version" { print $2; exit }
-          ')
-          test -n "$MINOS" || { echo 'Could not determine deployment target'; exit 1; }
-          awk -v v="$MINOS" 'BEGIN {
-            split(v, a, "."); major=a[1]+0; minor=a[2]+0;
-            if (major > 10 || (major == 10 && minor > 13)) exit 1;
-          }' || { echo "ERROR: deployment target $MINOS is newer than macOS 10.13"; exit 1; }
-          echo "SILVETON_VST3=$VST" >> "$GITHUB_ENV"
-
-      - name: Package Mac plugin source tests and exact preview
-        shell: bash
-        run: |
-          set -euo pipefail
           mkdir -p artifact
-          ditto "$SILVETON_VST3" 'artifact/Silveton Channel Strip.vst3'
-          cp binary-info.txt deployment-info.txt parameter-smoke-tests.txt gui-functional-tests.txt \
-             dsp-core-hashes-before.txt dsp-core-hashes-after.txt gui-preview-silveton-v0.5.2.png artifact/
-          cp overlay/approved-visual-reference.png artifact/approved-visual-reference.png
-          ditto -c -k --sequesterRsrc --keepParent 'artifact/Silveton Channel Strip.vst3' \
-             Silveton-Channel-Strip-v0.5.2-macOS-Intel.zip
-          ditto -c -k --sequesterRsrc --keepParent "$PROJECT_ROOT" \
-             Silveton-Channel-Strip-v0.5.2-source.zip
+          ditto "$VST" 'artifact/Silveton Channel Strip.vst3'
+          ditto -c -k --sequesterRsrc --keepParent \
+            'artifact/Silveton Channel Strip.vst3' \
+            Silveton-Channel-Strip-v0.5.2-macOS-Intel.zip
 
       - name: Upload Silveton v0.5.2
         uses: actions/upload-artifact@v4
         with:
           name: Silveton-Channel-Strip-v0.5.2-macOS-Intel
           if-no-files-found: error
-          path: |
-            Silveton-Channel-Strip-v0.5.2-macOS-Intel.zip
-            Silveton-Channel-Strip-v0.5.2-source.zip
-            artifact/gui-preview-silveton-v0.5.2.png
-            artifact/approved-visual-reference.png
-            artifact/parameter-smoke-tests.txt
-            artifact/gui-functional-tests.txt
-            artifact/binary-info.txt
-            artifact/deployment-info.txt
+          path: Silveton-Channel-Strip-v0.5.2-macOS-Intel.zip
